@@ -23,6 +23,16 @@ Endpoints:
     POST /watermark/batch -> {"files": [{"text": str, "keys": list[int], ...}, ...]}
                          -> {"results": [{"name", "ok", "kind", "watermarked_text", "report"}, ...]}
 
+Text web UI (see webui_api.py; the page is served at GET / and /ui/<file>, exempt from the
+bearer check, while every /api/* and the endpoints above stay protected):
+    GET  /api/llm/profiles           -> server-side LLM profiles (no URLs, no keys)
+    GET  /api/llm/models?profile=ID  -> models offered by that profile's LLM server
+    POST /api/text/scan              -> {"text", "ai_detect"?} -> Layer A/B findings + AI verdict
+    POST /api/text/clean             -> {"text", "layer_a"?, "layer_b"?} -> cleaned text + diffs
+    POST /api/text/paraphrase        -> {"text", "mode"?, "intensity"?} -> paraphrase + diff
+LLM profiles come from --llm-profiles / WATERMARKS_LLM_PROFILES (config/llm_profiles.json);
+the browser can only name a profile, never supply a URL.
+
 Batch endpoints loop the same single-file pipeline as /inspect, /detect, /clean, and /watermark; a
 per-file failure (unknown format, oversized name, bad option) shows up as
 that entry's "ok": false with an "error" string and never aborts the rest of
@@ -48,16 +58,19 @@ import sys
 import tempfile
 import time
 import urllib.error
+from collections.abc import Callable
 from datetime import datetime
 from functools import cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import webui_api
+import webui_llm
 from av_meta import clean_av, inspect_av
 from clean_audio import audio_purify, is_audio_format, is_audio_name, media_has_video
 from clean_video import video_purify
@@ -117,6 +130,9 @@ ALLOWED_CLEAN_OPTIONS = {
     "clean_attachments": str,
     "style": str,
     "strategy": str,
+    # Opt-in: text Layer A only, skip the server-side Layer B rewrite (the
+    # calling agent then does Layer B itself with its own non-origin model).
+    "layer_a_only": bool,
 }
 
 # Default Layer B strategy loaded from the strategy config file (overridable by
@@ -805,6 +821,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     },
 }
 
+_OPENAPI_PATHS.update(webui_api.openapi_paths())
+
 _COMMON_ERRORS = {
     "400": {
         "description": "Bad request",
@@ -842,6 +860,7 @@ def openapi_spec() -> dict[str, Any]:
             paths.setdefault(path, {})[method] = {
                 "summary": op["summary"],
                 "responses": responses,
+                **({"parameters": op["parameters"]} if op.get("parameters") else {}),
                 **((op.get("requestBody") and {"requestBody": op["requestBody"]}) or {}),
             }
 
@@ -1256,13 +1275,20 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
             # default (or per-request) rewrite strategy and reject (400) when no
             # strategy is available or a step's backend/model can't run.
             strategy = options.get("strategy") or _DEFAULT_STRATEGY
-            if not strategy:
+            layer_a_only = bool(options.get("layer_a_only"))
+            if not strategy and not layer_a_only:
                 raise ValueError(
                     "Layer B rewrite is required for text cleaning; configure a "
                     "default strategy (config/clean_strategy.json) or pass "
                     "options.strategy"
                 )
-            cleaned, layer_b = _apply_layer_b(cleaned, strategy, options)
+            if layer_a_only:
+                layer_b = {
+                    "applied": False,
+                    "reason": "layer_a_only requested; Layer B rewrite left to the caller",
+                }
+            else:
+                cleaned, layer_b = _apply_layer_b(cleaned, strategy, options)
             if detect_after:
                 detector_reports["after"] = run_text_detectors(cleaned)
             cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
@@ -1448,8 +1474,41 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_static(self, path: str) -> None:
+        res = webui_api.static_response(path)
+        self.send_response(res.status)
+        self.send_header("Content-Type", res.content_type)
+        self.send_header("Content-Length", str(len(res.body)))
+        for name, value in webui_api.SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(res.body)
+
+    def _run_api(self, handler: Callable[[Any], dict[str, Any]], arg: Any, path: str) -> None:
+        """Run a web UI handler and map ApiError/ValueError/unexpected errors to responses."""
+        try:
+            payload = handler(arg)
+        except webui_api.ApiError as e:
+            self._respond(e.status, e.payload())
+            return
+        except ValueError as e:
+            self._respond(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(e)})
+            return
+        except Exception as e:
+            self.log_error("error handling %s: %r", path, e)
+            self._respond(
+                HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal error"}
+            )
+            return
+        self._respond(HTTPStatus.OK, payload)
+
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if webui_api.is_static_path(path):
+            # The page and its assets must load without a bearer header.
+            self._send_static(path)
+            return
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
@@ -1459,6 +1518,9 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.OK, {"ok": True, **capabilities()})
         elif path == "/openapi.json":
             self._respond(HTTPStatus.OK, openapi_spec())
+        elif path in webui_api.GET_ROUTES:
+            query = {k: v[0] for k, v in parse_qs(parsed.query).items() if v}
+            self._run_api(webui_api.GET_ROUTES[path], query, path)
         else:
             self._respond(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
 
@@ -1467,7 +1529,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
-        if path not in (
+        api_handler = webui_api.POST_ROUTES.get(path)
+        if api_handler is None and path not in (
             "/inspect",
             "/clean",
             "/detect",
@@ -1487,6 +1550,9 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE if oversized else HTTPStatus.BAD_REQUEST,
                 {"ok": False, "error": "invalid request body"},
             )
+            return
+        if api_handler is not None:
+            self._run_api(api_handler, body, path)
             return
         try:
             if path == "/inspect/batch":
@@ -1665,6 +1731,30 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(HTTPStatus.OK, {"ok": True, "results": results})
 
 
+def _load_llm_profiles(configured: str | None) -> None:
+    """Install the web UI LLM profile registry (file, or built-in defaults)."""
+    explicit = bool(configured)
+    path = Path(configured or "config/llm_profiles.json")
+    if not path.is_absolute() and not path.exists():
+        repo_candidate = Path(__file__).resolve().parents[2] / path
+        if repo_candidate.exists():
+            path = repo_candidate
+    if not path.exists():
+        if explicit:
+            raise SystemExit(f"LLM profiles file not found: {path}")
+        registry = webui_llm.load_registry(None, os.environ)
+    else:
+        try:
+            registry = webui_llm.load_registry(path, os.environ)
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
+    webui_llm.set_registry(registry)
+    names = ", ".join(
+        f"{p.id} ({p.backend} @ {p.public()['base_url_host']})" for p in registry.profiles.values()
+    )
+    eprint(f"LLM profiles: {names or 'none'} (default: {registry.default_id})")
+
+
 def main() -> int:
     global API_KEY  # noqa: PLW0603 — CLI overrides env
     p = argparse.ArgumentParser(description=__doc__)
@@ -1680,6 +1770,13 @@ def main() -> int:
         "config/clean_strategy.json; WATERMARKS_CLEAN_STRATEGY_FILE). A strategy "
         "step is 'tactic@intensity' (e.g. 'paraphrase@0.8,mlm@0.2').",
     )
+    p.add_argument(
+        "--llm-profiles",
+        default=os.environ.get("WATERMARKS_LLM_PROFILES"),
+        help="Path to the web UI LLM profiles JSON (default: config/llm_profiles.json; "
+        "WATERMARKS_LLM_PROFILES). Without a file: a built-in 'local' Ollama profile, plus "
+        "'remote' (OpenAI-compatible, e.g. LM Studio) when WATERMARKS_LLM_REMOTE_URL is set.",
+    )
     p.add_argument("-V", "--version", action="store_true", help="print version and exit")
     args = p.parse_args()
 
@@ -1689,7 +1786,16 @@ def main() -> int:
 
     API_KEY = args.api_key
     global _DEFAULT_STRATEGY  # noqa: PLW0603 — loaded once at startup
-    _DEFAULT_STRATEGY = _load_default_strategy(Path(args.strategy_config))
+    strategy_path = Path(args.strategy_config)
+    if not strategy_path.is_absolute() and not strategy_path.exists():
+        # Fall back to the repo root so the default config is found when the
+        # server is started from outside the checkout.
+        repo_candidate = Path(__file__).resolve().parents[2] / strategy_path
+        if repo_candidate.exists():
+            strategy_path = repo_candidate
+    _DEFAULT_STRATEGY = _load_default_strategy(strategy_path)
+
+    _load_llm_profiles(args.llm_profiles)
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         eprint(f"warning: binding {args.host} — intended for a trusted network only")
@@ -1700,6 +1806,7 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     eprint(f"watermarks-remover service {VERSION} on http://{args.host}:{args.port}")
+    eprint(f"Web UI: http://{args.host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

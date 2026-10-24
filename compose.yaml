@@ -34,6 +34,10 @@ services:
       WATERMARKS_SYNTHID_TEXT_URL: ${WATERMARKS_SYNTHID_TEXT_URL:-}
       WATERMARKS_SYNTHID_TEXT_API_KEY: ${WATERMARKS_SYNTHID_TEXT_API_KEY:-}
       WATERMARKS_SYNTHID_TEXT_TIMEOUT: ${WATERMARKS_SYNTHID_TEXT_TIMEOUT:-120}
+      # Text web UI (served at /): optional remote OpenAI-compatible LLM profile
+      # (e.g. LM Studio) and optional SlopTotal AI-text classifier sidecar.
+      WATERMARKS_LLM_REMOTE_URL: ${WATERMARKS_LLM_REMOTE_URL:-}
+      WATERMARKS_SLOPTOTAL_URL: ${WATERMARKS_SLOPTOTAL_URL:-}
     read_only: true
     tmpfs:
       - /tmp

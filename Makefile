@@ -3,7 +3,7 @@
 	smoke-markllm bootstrap-markllm docker-markllm-build docker-markllm-help \
 	smoke-markdiffusion bootstrap-markdiffusion docker-markdiffusion-build docker-markdiffusion-help \
 	bench-synthid-text bench-full bench-semantic \
-	docker-core-build docker-core-help serve compose-up compose-up-heavy compose-check \
+	docker-core-build docker-core-help serve web compose-up compose-up-heavy compose-check \
 	install-skill install-claude-code-skill install-claude-code-text-skill \
 	install-claude-project-skill package-cowork-skill package-cowork-text-skill \
 	install-cursor-text-skill plugin-validate clean
@@ -119,8 +119,14 @@ docker-core-build:
 docker-core-help:
 	docker run --rm watermarks-remover /app/scripts/server.py --help
 
-# Run the HTTP service locally (stdlib only, no Docker).
+# Run the HTTP service locally (stdlib only, no Docker). It also serves the
+# text web UI at http://127.0.0.1:8765/ (LLM profiles: config/llm_profiles.json).
 serve:
+	$(PYTHON) $(SCRIPTS)/server.py --host 127.0.0.1 --port 8765
+
+# Same server, with the UI address announced up front.
+web:
+	@echo "Web UI: http://127.0.0.1:8765/"
 	$(PYTHON) $(SCRIPTS)/server.py --host 127.0.0.1 --port 8765
 
 compose-up:

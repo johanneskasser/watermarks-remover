@@ -418,6 +418,60 @@ When `WATERMARKS_SYNTHID_TEXT_URL` is set, the service delegates generation to t
 checkout directly. Like detection, generation is fail-soft: an unconfigured generator
 reports `{"ok": false, "error": ...}`.
 
+## Web interface
+
+The service also ships a text web UI: paste text, **scan** it (invisible Unicode, watermark detectors, an AI-content estimate), **clean** it (Layer A, optionally followed by a Layer B LLM rewrite) and **paraphrase** it, with word-level diffs.
+
+```bash
+make web        # same server as `make serve`; open http://127.0.0.1:8765/
+```
+
+The page is served at `GET /` and `GET /ui/<file>` and is exempt from `WATERMARKS_SERVER_API_KEY` (a browser page load cannot send a bearer header); every `/api/*` call and all other endpoints stay protected, so with a key set the UI must send `Authorization: Bearer <key>` itself.
+
+**LLM profiles are server-side.** The browser can only name a profile (and optionally a model); it can never supply a URL, so the UI cannot be used to make the server call arbitrary hosts. Profiles come from a JSON file (`--llm-profiles`, `WATERMARKS_LLM_PROFILES`, default `config/llm_profiles.json`, which is gitignored; copy `config/llm_profiles.example.json`):
+
+```json
+{"default": "remote", "profiles": {
+  "local":  {"label": "Local Ollama", "backend": "ollama", "base_url": "http://127.0.0.1:11434", "model": "gemma4:12b"},
+  "remote": {"label": "Remote LM Studio", "backend": "openai-compatible",
+             "base_url": "http://192.168.1.50:1234", "model": "qwen/qwen3.8-27b", "api_key_env": "MY_LLM_KEY"}}}
+```
+
+`backend` is `ollama` or `openai-compatible` (LM Studio, vLLM, llama.cpp server, ...). Give `base_url` without a trailing `/v1`. API keys are read from the environment variable named by `api_key_env` (OpenAI-compatible profiles without one send a dummy key, which LM Studio ignores) and are never returned by any endpoint. Omit `model` to use the first non-embedding model the server lists. Profiles are operator-trusted configuration, so non-loopback hosts need no extra opt-in. Without a file, the built-in defaults are a `local` Ollama profile plus a `remote` OpenAI-compatible profile when `WATERMARKS_LLM_REMOTE_URL` is set.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/llm/profiles` | `{default, profiles: [{id, label, backend, model, base_url_host}]}` (host and port only) |
+| GET | `/api/llm/models?profile=ID` | models offered by the profile's server (embedding models last) |
+| POST | `/api/text/scan` | `{text, ai_detect: off\|heuristic\|llm\|both}` -> Layer A hits with offsets, Layer B detectors, stylometry, `ai_content` verdict |
+| POST | `/api/text/clean` | `{text, layer_a: {...}, layer_b: {enabled, strategy?, style?}}` -> original / after Layer A / final text plus `diff_a`, `diff_b`, `diff` |
+| POST | `/api/text/paraphrase` | `{text, mode: standard\|fluent\|formal\|simple\|creative\|shorten\|expand, intensity: 0..1}` -> final text plus diff |
+
+Texts are capped at 100,000 characters; paraphrase and Layer B split text over 3,000 characters on paragraph boundaries and rewrite the chunks one after another. LLM failures return `502` with `error_code` `llm_unreachable` or `llm_error`; an unknown profile is `400`; no configured profile is `503`.
+
+### What AI-content detection can and cannot do
+
+**There is no AI-content classifier in this repository, and none of these scores is proof.** `ai_content` combines up to three independent signals and always carries a disclaimer:
+
+- `stylometry` is the repo's own heuristic (sentence-length burstiness, stock AI phrases, lexical diversity). It is cheap and explainable but weak, uncalibrated below about 50 words, and easy to beat by editing.
+- `llm-judge` asks the selected LLM profile for an opinion. It is a language model's guess, not a measurement, and varies from run to run.
+- `sloptotal` (optional, below) is the only real classifier.
+
+Perplexity-style detectors (Binoculars, Fast-DetectGPT) are not available through Ollama or LM Studio because they need token log-probabilities of the input, which those servers do not provide.
+
+Verdict rule: the combined score is the weighted mean of the methods that returned a score (the SlopTotal classifier counts 3x, stylometry and the LLM judge 1x each); `>= 0.65` is `likely_ai`, `>= 0.40` is `mixed`, lower is `likely_human`, and `unknown` means no method produced a score. Formal, edited and non-native writing produces false positives; paraphrased or humanized AI text often passes as human. Do not accuse anyone on this basis.
+
+### Optional: SlopTotal classifier sidecar
+
+Set `WATERMARKS_SLOPTOTAL_URL` (operator config only, never taken from a request) to a running [SlopTotal](https://github.com/pablocaeg/sloptotal) (MIT, FastAPI). With it set, `ai_detect` `heuristic` and `both` also call `POST /api/analyze` and report a `sloptotal` method (`overall_score / 100`); `off` and `llm` never call it. The call times out after 15 seconds and fails soft (the method carries an `error`, the scan still succeeds). Texts over 12,000 characters are truncated for the classifier.
+
+```bash
+docker run -p 8000:8000 -v sloptotal-models:/app/models ghcr.io/pablocaeg/sloptotal   # or: pip install from source
+export WATERMARKS_SLOPTOTAL_URL=http://127.0.0.1:8000
+```
+
+It is CPU-only capable but heavy (about 9 GB of models, downloaded on the first scan). By the project's own benchmark it calls about 1.7% of native human text "Likely AI", is weaker below about 80 words and on non-native English (15% of TOEFL essays flagged), and catches AI text run through a humanizer or paraphraser only about half the time. Treat it as one more piece of evidence.
+
 ## Docker / compose
 
 Published images (GHCR):
@@ -510,6 +564,9 @@ set -a; . ./.env; set +a; python3 service/scripts/rewrite_text.py /tmp/x.txt -o 
 | `WATERMARKS_REWRITE_API_KEY` | `rewrite_text.py` hook | API key — env only, never on argv |
 | `WATERMARKS_REWRITE_ALLOW_REMOTE` | `rewrite_text.py` hook | `1` to allow non-loopback endpoints |
 | `WATERMARKS_REWRITE_REASONING_EFFORT` | `rewrite_text.py` hook | `none` (default) / `low` / `medium` / `high` / `off` |
+| `WATERMARKS_LLM_PROFILES` | `server.py` web UI | Path to the LLM profiles JSON (default `config/llm_profiles.json`) |
+| `WATERMARKS_LLM_REMOTE_URL` | `server.py` web UI | Built-in `remote` OpenAI-compatible profile when no profiles file exists (e.g. LM Studio, no `/v1`) |
+| `WATERMARKS_SLOPTOTAL_URL` | `server.py` web UI | Optional SlopTotal classifier sidecar for `/api/text/scan` (e.g. `http://127.0.0.1:8000`) |
 | `WATERMARKS_CLEAN_STRATEGY_FILE` | `server.py` `/clean` | Path to the Layer B strategy config JSON (default `config/clean_strategy.json`) |
 | `WATERMARKS_GUMBEL_KEY` | `detect_gumbel.py` / `text_detectors.py` | Secret key for keyed-Gumbel (EXP) same-key replay (e.g. `0x…`); preferred over argv — never logged |
 

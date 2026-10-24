@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Textwerkstatt</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/ui/style.css">
+<script src="/ui/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#input">Zum Eingabefeld springen</a>
+
+<header class="topbar">
+  <h1 class="brand">Textwerkstatt</h1>
+  <form class="conn" id="connForm" autocomplete="off" aria-label="Verbindung und Modell">
+    <div class="field">
+      <label for="profile">LLM-Profil</label>
+      <select id="profile" disabled><option value="">Lade …</option></select>
+    </div>
+    <div class="field">
+      <label for="model">Modell</label>
+      <div class="inline">
+        <select id="model" disabled><option value="">Lade …</option></select>
+        <button type="button" class="btn icon" id="refresh" aria-label="Profile und Modelle neu laden" title="Profile und Modelle neu laden">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="token">API-Token</label>
+      <div class="inline">
+        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Bearer-Token">
+        <label class="check small" for="remember"><input id="remember" type="checkbox"> merken</label>
+      </div>
+    </div>
+    <div class="status" id="connStatus" role="status">
+      <span class="dot" id="connDot" data-state="idle" aria-hidden="true"></span>
+      <span id="connText">Verbindung: prüfe …</span>
+    </div>
+  </form>
+</header>
+
+<main class="layout">
+  <section class="pane" aria-labelledby="h-in">
+    <div class="pane-head">
+      <h2 id="h-in">Eingabe</h2>
+      <div class="seg" role="group" aria-label="Ansicht des Eingabetexts">
+        <button type="button" id="viewEdit" aria-pressed="true">Bearbeiten</button>
+        <button type="button" id="viewMirror" aria-pressed="false">Markiert</button>
+      </div>
+    </div>
+    <div class="editor">
+      <textarea id="input" aria-label="Eingabetext" placeholder="Text hier einfügen oder eintippen …" spellcheck="false"></textarea>
+      <div id="mirror" class="mirror" hidden tabindex="0" role="region" aria-label="Markierte, schreibgeschützte Ansicht des Eingabetexts"></div>
+    </div>
+    <div class="meta">
+      <span id="counts">0 Zeichen · 0 Wörter</span>
+      <button type="button" class="linkish" id="invisHint" hidden></button>
+      <span id="mirrorInfo" class="muted"></span>
+    </div>
+    <div class="tools">
+      <button type="button" class="btn" id="paste">Einfügen</button>
+      <button type="button" class="btn" id="clear">Leeren</button>
+      <button type="button" class="btn" id="sample">Beispiel laden</button>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Aktion">
+      <button type="button" role="tab" id="tab-scan" aria-controls="panel-scan" aria-selected="true">Scannen</button>
+      <button type="button" role="tab" id="tab-clean" aria-controls="panel-clean" aria-selected="false" tabindex="-1">Bereinigen</button>
+      <button type="button" role="tab" id="tab-paraphrase" aria-controls="panel-paraphrase" aria-selected="false" tabindex="-1">Paraphrasieren</button>
+    </div>
+
+    <div class="opts" role="tabpanel" id="panel-scan" aria-labelledby="tab-scan">
+      <div class="field">
+        <label for="aiDetect">KI-Erkennung</label>
+        <select id="aiDetect">
+          <option value="off">Aus</option>
+          <option value="heuristic" selected>Heuristik</option>
+          <option value="llm">LLM-Judge</option>
+          <option value="both">Beides</option>
+        </select>
+      </div>
+      <p class="hint">Unsichtbare Zeichen (Layer A) und statistische Wasserzeichen-Detektoren (Layer B) werden immer geprüft. „LLM-Judge“ nutzt das gewählte Profil und kann länger dauern.</p>
+      <div class="actions"><button type="button" class="btn primary" data-run="scan">Scannen</button></div>
+    </div>
+
+    <div class="opts" role="tabpanel" id="panel-clean" aria-labelledby="tab-clean" hidden>
+      <fieldset>
+        <legend>Layer A: deterministisch</legend>
+        <label class="check"><input type="checkbox" id="a-nfkc"> NFKC-Normalisierung</label>
+        <label class="check"><input type="checkbox" id="a-homoglyphs"> Aggressive Homoglyphen-Ersetzung</label>
+        <label class="check"><input type="checkbox" id="a-spaces" checked> Leerzeichen normalisieren</label>
+        <label class="check"><input type="checkbox" id="a-emoji"> Emoji-Verbinder entfernen</label>
+        <label class="check"><input type="checkbox" id="a-bidi"> Bidi-Steuerzeichen entfernen</label>
+      </fieldset>
+      <fieldset>
+        <legend>Layer B: LLM-Umschreibung</legend>
+        <label class="check"><input type="checkbox" id="b-enable"> Layer B aktivieren</label>
+        <div class="row2">
+          <div class="field">
+            <label for="b-strategy">Strategie</label>
+            <input id="b-strategy" type="text" value="paraphrase@0.8" spellcheck="false" disabled>
+          </div>
+          <div class="field">
+            <label for="b-style">Stil (optional)</label>
+            <input id="b-style" type="text" placeholder="z. B. sachlich" disabled>
+          </div>
+        </div>
+      </fieldset>
+      <div class="actions"><button type="button" class="btn primary" data-run="clean">Bereinigen</button></div>
+    </div>
+
+    <div class="opts" role="tabpanel" id="panel-paraphrase" aria-labelledby="tab-paraphrase" hidden>
+      <fieldset>
+        <legend>Modus</legend>
+        <div class="chips" id="modes">
+          <label class="mode"><input type="radio" name="mode" value="standard" checked><span>Standard</span></label>
+          <label class="mode"><input type="radio" name="mode" value="fluent"><span>Flüssig</span></label>
+          <label class="mode"><input type="radio" name="mode" value="formal"><span>Formell</span></label>
+          <label class="mode"><input type="radio" name="mode" value="simple"><span>Einfach</span></label>
+          <label class="mode"><input type="radio" name="mode" value="creative"><span>Kreativ</span></label>
+          <label class="mode"><input type="radio" name="mode" value="shorten"><span>Kürzen</span></label>
+          <label class="mode"><input type="radio" name="mode" value="expand"><span>Erweitern</span></label>
+        </div>
+      </fieldset>
+      <div class="field">
+        <label for="intensity">Intensität: <output id="intensityOut" for="intensity">80 %</output></label>
+        <input id="intensity" type="range" min="0" max="100" step="5" value="80">
+      </div>
+      <label class="check"><input type="checkbox" id="layerAAfter" checked> Layer A danach anwenden</label>
+      <div class="actions"><button type="button" class="btn primary" data-run="paraphrase">Paraphrasieren</button></div>
+    </div>
+  </section>
+
+  <section class="pane" aria-labelledby="h-out">
+    <div class="pane-head"><h2 id="h-out">Ergebnis</h2></div>
+    <div class="runbar" id="runbar">
+      <span id="runText" class="muted">Bereit.</span>
+      <button type="button" class="btn sm" id="cancel" disabled>Abbrechen</button>
+    </div>
+    <div id="alert" class="alert" role="alert" hidden></div>
+    <div id="stale" class="note" hidden>Die Eingabe wurde seit diesem Ergebnis geändert. Markierungen und Diff beziehen sich auf den alten Text.</div>
+    <div id="results" aria-live="off">
+      <p class="empty">Noch kein Ergebnis. Text links einfügen, Aktion wählen und starten. Strg/Cmd + Enter im Eingabefeld startet die gewählte Aktion.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<div id="sr" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>

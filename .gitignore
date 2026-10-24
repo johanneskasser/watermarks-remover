@@ -43,6 +43,8 @@
 
 # Exceptions even inside allowed trees
 .env
+# Operator-local web UI LLM profiles (may name private hosts / key env vars)
+/config/llm_profiles.json
 **/__pycache__/
 *.pyc
 # The stealer's downloaded prompt corpus is generated data, not source.

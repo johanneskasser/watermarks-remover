@@ -1,0 +1,18 @@
+{
+  "default": "remote",
+  "profiles": {
+    "local": {
+      "label": "Local Ollama",
+      "backend": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "gemma4:12b"
+    },
+    "remote": {
+      "label": "Remote LM Studio",
+      "backend": "openai-compatible",
+      "base_url": "http://192.168.1.50:1234",
+      "model": "qwen/qwen3.8-27b",
+      "api_key_env": "WATERMARKS_LLM_REMOTE_API_KEY"
+    }
+  }
+}
